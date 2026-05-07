@@ -32,6 +32,8 @@ AI生成代码时容易出现以下问题，**每次生成代码后必须检查*
 | **臆造导入路径** | 编译错误 | 导入不存在或错误的包路径（如`GIDS/adapter/csp`实际不存在） | 高 |
 | **臆造方法/函数** | 编译错误 | 调用不存在的方法（如`csp.GetNodeIP()`实际应为`manager.GetNodeIP()`） | 高 |
 | **臆造配置项** | 运行错误 | 使用不存在的环境变量或配置项（应复用现有配置） | 高 |
+| **臆造函数实现** | 设计问题 | generateUUID()时间戳拼接、getLocalIP()硬编码127.0.0.1 | **高** |
+| **HTTP请求未复用builder** | 设计问题 | 手动http.NewRequest + 手动重试循环 | **高** |
 | **未使用变量** | 编译错误 | 定义变量后忘记在代码中使用 | 高 |
 | **缺失import** | 编译错误 | 使用符号但忘记导入对应包 | 高 |
 | **context传nil** | 运行风险 | HTTP调用传入nil context而非`context.TODO()` | 中 |
@@ -39,11 +41,57 @@ AI生成代码时容易出现以下问题，**每次生成代码后必须检查*
 | **硬编码URL/IP** | 设计问题 | 应通过CSE服务发现或配置读取，而非硬编码 | 中 |
 | **新建配置文件** | 设计问题 | 应复用现有环境变量/常量，而非新建配置文件 | 中 |
 
+#### 0.1 常见臆造函数案例
+
+| 臆造函数 | 存量接口 | 检查命令 |
+| --- | --- | --- |
+| `generateUUID()` | `github.com/google/uuid.New().String()` | grep "uuid.New" |
+| `getLocalIP()` 硬编码 | `https.GetLocalIP(ethEnv, defaultEth)` | grep "GetLocalIP" |
+| 手动HTTP构建 | `https.NewRequest().WithRetry()` | grep "NewRequest" |
+
+**臆造函数示例**：
+```go
+// ❌ 臆造：generateUUID时间戳拼接
+func generateUUID() string {
+    return fmt.Sprintf("%d-%d", time.Now().UnixNano(), time.Now().Nanosecond())
+}
+
+// ✅ 正确：使用google/uuid
+import "github.com/google/uuid"
+transactionID := uuid.New().String()
+
+// ❌ 臆造：getLocalIP硬编码
+func getLocalIP() string {
+    return "127.0.0.1"
+}
+
+// ✅ 正确：使用存量接口
+peerIP := "unknown"
+if ip, err := https.GetLocalIP("FABRIC_ETH", "bond-base"); err == nil {
+    peerIP = ip
+}
+```
+
+#### 0.2 HTTP请求构建优先规则
+
+| 场景 | 禁止做法 | 推荐做法 |
+| --- | --- | --- |
+| HTTP POST请求 | 手动`http.NewRequest` + 手动重试循环 | `https.NewRequest().WithRetry().Method().URL()...` |
+| 获取本地IP | `getLocalIP()` 硬编码 | `https.GetLocalIP(ethEnv, defaultEth)` |
+| UUID生成 | `generateUUID()` 时间戳拼接 | `uuid.New().String()` |
+
+**builder复用优势**：
+- ✅ 链式调用，代码简洁
+- ✅ 内置指数退避重试策略
+- ✅ 与存量代码风格一致
+
 **检查方法**：
 1. 生成代码后，先用`grep`搜索导入路径是否存在
 2. 用`grep`搜索方法名是否在代码仓中存在
 3. 用`grep`搜索环境变量名是否在其他代码中使用
 4. 检查变量是否在后续代码中被引用
+5. **检查是否有臆造函数**（generateUUID、getLocalIP等）
+6. **检查HTTP请求是否使用builder**（而非手动构建）
 
 ### 1. Go代码检查项
 
@@ -151,7 +199,50 @@ AI生成代码时容易出现以下问题，**每次生成代码后必须检查*
 | **接口不一致** | 设计问题 | 多种模式（CSP/Custom）实现类字段/方法签名不一致 | 高 |
 | **命名不规范** | 可读性问题 | 变量/方法命名不符合项目规范 | 中 |
 | **结构体字段冗余** | 设计问题 | 定义字段但未使用，或与接口字段重复 | 中 |
-| **注释缺失关键信息** | 文档问题 | 公共API缺少注释或注释不完整 | 低 |
+| **注释缺失** | 文档问题 | 公共函数缺少中文注释 | 中 |
+
+#### 4.1 注释检查步骤
+
+**必须注释**：
+- ✅ 所有公共函数（exported functions）
+- ✅ 格式：`// 函数名 功能说明`（中文注释）
+
+**不需要注释**：
+- ❌ 接口定义：`type XXXService interface`
+- ❌ 实现类：`type xxxServiceImpl struct`
+- ❌ 数据实体：`type XxxEntity struct`
+- ❌ DAO结构体：`type XxxDao struct`
+- ❌ 常量定义：`const XXX = ...`
+
+**检查步骤**：
+1. 检查文件首行是否有版权声明
+2. 使用grep搜索所有exported函数（`func [A-Z]`）
+3. 对每个exported函数检查是否有注释
+4. 检查注释格式是否为中文（`// 函数名 说明`）
+5. 删除多余注释（接口、实现类、实体、DAO、常量）
+
+**注释示例**：
+```go
+// ✅ 正确：公共函数有中文注释
+// SendAlarm 发送告警请求
+func (s *SnmpClient) SendAlarm(alarm *AlarmRequest) error {
+    return s.sendRequest("/v1/app/alarm", alarm)
+}
+
+// ❌ 错误：接口定义不需要注释
+// SnmpClient SNMP客户端
+type SnmpClient struct { ... }  // 实体无需注释
+
+// ❌ 错误：英文注释
+// SendAlarm sends alarm request
+func SendAlarm() { ... }
+
+// ✅ 正确：接口无注释（接口名已说明用途）
+type SnmpInitService interface {
+    InitSnmpClient() error
+    GetSnmpClient() *snmp.SnmpClient
+}
+```
 
 ---
 

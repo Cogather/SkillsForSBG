@@ -79,6 +79,48 @@ flowchart TB
 | **方法调用** | 使用`grep`搜索方法名，确认签名匹配 |
 | **配置项** | 复用现有环境变量/常量，不新建配置 |
 | **服务地址** | 使用CSE服务发现（`cse://ServiceName/path`），不硬编码IP |
+| **HTTP请求构建** | 优先使用`https.NewRequest()` builder，不手动构建HTTP请求 |
+| **UUID生成** | 使用`github.com/google/uuid.New()`，不臆造时间戳拼接函数 |
+| **获取本地IP** | 使用`https.GetLocalIP(ethEnv, defaultEth)`，不臆造硬编码函数 |
+
+#### HTTP请求构建优先复用builder
+
+| 场景 | 禁止做法 | 推荐做法 |
+| --- | --- | --- |
+| HTTP POST请求 | 手动`http.NewRequest` + 手动重试循环 | `https.NewRequest().WithRetry().Method().URL()...` |
+| 获取本地IP | `getLocalIP()` 硬编码127.0.0.1 | `https.GetLocalIP("FABRIC_ETH", "bond-base")` |
+| UUID生成 | `generateUUID()` 时间戳拼接 | `uuid.New().String()` |
+
+**builder复用优势**：
+- ✅ 链式调用，代码简洁
+- ✅ 内置指数退避重试策略（2s→4s→8s→16s→32s→60s）
+- ✅ 自动处理序列化、Header设置
+- ✅ 与存量代码风格一致
+
+**示例对比**：
+```go
+// ❌ 禁止：手动构建HTTP请求 + 手动重试
+func doPost(url string, body []byte) error {
+    req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+    req.Header.Set("transaction-id", generateUUID())  // 臆造函数
+    req.Header.Set("peer-ip", getLocalIP())           // 臆造函数
+    for retry := 0; retry < 3; retry++ {
+        resp, err := client.Do(req)
+        time.Sleep(5 * time.Second)  // 固定间隔（未复用存量退避策略）
+    }
+}
+
+// ✅ 推荐：复用存量builder
+response := https.NewRequest(client).
+    WithRetry(3).                    // 指数退避重试
+    Method("POST").
+    URL(url).
+    Header("transaction-id", uuid.New().String()).  // 复用google/uuid
+    Header("peer-ip", peerIP).
+    ParamFromInterface(body).        // 自动序列化
+    Complete().
+    Do()
+```
 
 #### 必须符合现有代码实现风格（全面检查）
 
@@ -183,11 +225,53 @@ func StartMasterElection() {
 #### 代码质量基线（Go）
 
 | 要求 | 标准 |
-| --- | --- |
+| --- | --- | --- |
 | **单例初始化** | 使用`sync.Once`保护 |
 | **context参数** | 使用`context.TODO()`而非`nil` |
-| **错误处理** | 所有error返回值必须检查处理 |
+| **错误处理** | **所有error返回值必须检查处理**，禁止Unhandled error |
 | **资源释放** | HTTP Body、File、Request必须defer Close |
+| **注释风格** | 中文注释，格式：`// 函数名 功能说明`，参考现有代码 |
+
+**Unhandled error检查要点**：
+- **禁止忽略error返回值**：所有返回error的函数调用必须检查并处理
+- **处理方式**：
+  - 记录日志：`if err := xxx(); err != nil { logger.Errorf(...) }`
+  - 返回错误：`if err := xxx(); err != nil { return err }`
+  - 业务处理：根据error进行分支逻辑
+- **常见遗漏场景**：
+  - DAO层Update/Insert/Delete操作
+  - HTTP Body.Close()
+  - File.Close()
+  - orm操作
+- **检查方法**：使用`go vet ./...`检测Unhandled error警告
+
+**注释风格要求**：
+- **格式**：`// 函数名 功能说明`（中文注释）
+- **注释规则（重要）**：
+  - ✅ **必须注释**：所有公共函数（func开头，包括导出函数和公共方法）
+  - ❌ **不注释**：
+    - 接口定义：`type XXXService interface` — 接口名已说明用途
+    - 实现类：`type xxxServiceImpl struct` — private类无需注释
+    - 数据实体：`type XxxEntity struct` — models层实体无注释
+    - DAO结构体：`type XxxDao struct` — dao层结构体无注释
+    - 常量定义：`const XXX = ...` — 常量名已说明用途
+  - ✅ **可选注释**：复杂字段说明（极少使用）
+- **示例**：
+  ```go
+  // Query 查询选主记录
+  func (d *GidsMasterDao) Query() (*db.GidsMaster, error) { ... }
+  
+  // UpdateTimestamp 更新时间戳
+  func (d *GidsMasterDao) UpdateTimestamp(timestamp time.Time) error { ... }
+  
+  // StartMasterElection 启动选主服务
+  func StartMasterElection() { ... }
+  ```
+- **版权声明**：文件首行必须包含版权声明
+  ```go
+  // Copyright (c) Huawei Technologies Co., Ltd. 2026. All rights reserved.
+  ```
+- **参考文件**：查看`src/dao/*.go`、`src/service/*.go`现有注释风格
 
 #### 代码质量基线（Java）
 
@@ -287,14 +371,58 @@ public class XxxServiceImplTest {
 | 检查项 | 检查方法 | 优先级 |
 | --- | --- | --- |
 | **已有接口复用检查** | 对比新增功能与现有接口，检查是否遗漏复用 | **极高（新增）** |
+| **Unhandled error检查** | `go vet ./...` 检测未处理的error返回值 | **极高** |
 | **导入路径验证** | `grep -r "导入路径" --include="*.go"` 确认存在 | 高 |
 | **方法存在验证** | `grep -r "func 方法名" --include="*.go"` 确认签名 | 高 |
 | **代码风格一致性** | 对比main.go现有初始化风格，确保一致 | **高** |
+| **注释风格检查** | 检查是否使用中文注释，格式是否正确 | 高 |
 | **未使用变量** | 人工检查每个变量是否被引用 | 高 |
 | **context传nil** | 人工检查ContextDo调用 | 中 |
 | **单例无锁保护** | 人工检查sync.Once使用 | 高 |
 
 ### 2.2 已有接口复用检查（新增环节）
+
+**检查目的**：确保新增代码最大化复用现有接口，避免重复实现和臆造函数。
+
+### 2.2.1 常见臆造函数案例（必查项）
+
+| 臆造函数 | 存量接口 | 检查命令 | 修正动作 |
+| --- | --- | --- | --- |
+| `generateUUID()` 时间戳拼接 | `github.com/google/uuid.New()` | grep "uuid.New" | 删除臆造函数，导入google/uuid |
+| `getLocalIP()` 硬编码127.0.0.1 | `https.GetLocalIP(ethEnv, defaultEth)` | grep "GetLocalIP" | 删除臆造函数，复用存量接口 |
+| 手动HTTP请求构建 + 手动重试 | `https.NewRequest().WithRetry()` | grep "NewRequest" | 改为builder链式调用 |
+| `fmt.Sprintf("%d-%d", time.Now()...)` | `uuid.New().String()` | grep "uuid" | 使用标准库UUID |
+
+**检查步骤**：
+1. 对新增的private函数，使用grep搜索存量代码是否有类似实现
+2. 检查导入的包是否有对应方法（如uuid包的New()方法）
+3. 优先使用存量builder而非手动构建HTTP请求
+4. 检查是否有硬编码值（如127.0.0.1）应改为动态获取
+
+**臆造函数示例**：
+```go
+// ❌ 臆造函数：generateUUID
+func generateUUID() string {
+    return fmt.Sprintf("%d-%d", time.Now().UnixNano(), time.Now().Nanosecond())
+}
+
+// ✅ 正确：使用google/uuid
+import "github.com/google/uuid"
+transactionID := uuid.New().String()
+
+// ❌ 臆造函数：getLocalIP
+func getLocalIP() string {
+    return "127.0.0.1"  // 硬编码
+}
+
+// ✅ 正确：使用存量接口
+peerIP := "unknown"
+if ip, err := https.GetLocalIP("FABRIC_ETH", "bond-base"); err == nil {
+    peerIP = ip
+}
+```
+
+### 2.2.2 已有接口复用检查步骤
 
 **检查目的**：确保新增代码最大化复用现有接口，避免重复实现。
 
@@ -377,14 +505,32 @@ grep -rn "type.*AlarmInfo\|type.*AlarmParam" --include="*.go" src/
 
 **重构方案**：删除重复实现 X 处，复用现有接口 Y 处。
 
-### 2.3.2 AI臆造检查
+### 2.3.2 Unhandled error检查
+
+| 文件 | 行号 | 问题代码 | 修正建议 |
+| --- | --- | --- | --- |
+| master_election_service.go | 131 | `s.dao.UpdateTimestamp(now)` | 添加error检查并记录日志 |
+| master_election_service.go | 182 | `s.dao.UpdateIsRegistered(false)` | 添加error检查并记录日志 |
+
+**修正代码示例**：
+```go
+// 原代码（Unhandled error）
+s.dao.UpdateTimestamp(now)
+
+// 修正后
+if err := s.dao.UpdateTimestamp(now); err != nil {
+    logger.Errorf("Failed to update timestamp: %v", err)
+}
+```
+
+### 2.3.3 AI臆造检查
 
 | 检查项 | 结果 | 说明 |
 | --- | --- | --- |
 | 臆造导入路径 | ✅/❌ | 列出所有导入，逐个grep验证 |
 | 臆造方法调用 | ✅/❌ | 列出所有方法调用，逐个grep验证 |
 
-### 2.3.3 代码风格一致性检查
+### 2.3.4 代码风格一致性检查
 
 | 现有服务 | 启动方式 | 风格特点 |
 | --- | --- | --- |
@@ -396,7 +542,25 @@ grep -rn "type.*AlarmInfo\|type.*AlarmParam" --include="*.go" src/
 | --- | --- | --- | --- |
 | MasterElection | `xxx := NewXXX(); go xxx.Start()` | ❌ 不一致 | 改为`go service.StartXXX()` |
 
-### 2.3.4 其他检查
+### 2.3.5 注释风格检查
+
+| 检查项 | 当前实现 | 是否符合要求 | 修正建议 |
+| --- | --- | --- | --- |
+| 版权声明 | 缺失 | ❌ 不符合 | 添加版权声明 |
+| 函数注释格式 | 英文注释 | ❌ 不符合 | 改为中文注释：`// 函数名 说明` |
+| 注释内容 | 无说明 | ❌ 不符合 | 添加功能说明 |
+
+**修正示例**：
+```go
+// 原代码
+func Query() (*db.GidsMaster, error) { ... }
+
+// 修正后
+// Query 查询选主记录
+func Query() (*db.GidsMaster, error) { ... }
+```
+
+### 2.3.6 其他检查
 
 | 检查项 | 结果 | 说明 |
 | --- | --- | --- |
@@ -413,12 +577,28 @@ grep -rn "type.*AlarmInfo\|type.*AlarmParam" --include="*.go" src/
 3. 更新代码文件
 4. 重新执行质量检查
 
+**Unhandled error修正流程**：
+1. 使用`go vet ./...`检测所有Unhandled error警告
+2. 为每个遗漏的error检查添加处理逻辑
+3. 选择合适的处理方式：
+   - 需要中断流程：返回error
+   - 仅需记录：使用logger记录error
+   - 业务分支：根据error进行判断
+4. 重新编译和vet检查，确保无遗漏
+
 **已有接口复用缺陷修正流程**：
 1. 列出所有重复实现的方法/结构体
 2. 确定可复用的现有接口及调用方式
 3. 重构代码，删除重复实现，改为调用现有接口
 4. 重新编译，确保无语法错误
 5. 运行测试，验证功能正确性
+
+**注释风格修正流程**：
+1. 检查文件首行是否有版权声明
+2. 检查所有公共函数是否有注释
+3. 将注释改为中文格式：`// 函数名 说明`
+4. **删除多余注释**：接口、实现类、实体、DAO结构体、常量均不需要注释
+5. 参考现有代码确保风格一致
 
 **修正闭环条件**：所有高严重度缺陷修正完成
 
