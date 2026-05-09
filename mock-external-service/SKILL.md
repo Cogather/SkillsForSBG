@@ -7,7 +7,7 @@ metadata:
   version: "1.0"
 ---
 
-# Mock External Dependency - 外部依赖本地打桩技能
+# Mock External Service - 外部依赖本地打桩技能
 
 ## 适用场景
 
