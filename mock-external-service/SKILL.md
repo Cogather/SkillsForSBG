@@ -1,3 +1,12 @@
+---
+name: mock-external-service
+description: Add or adjust HTTP Mock routes for external dependencies (GIDS, stats, etc.) so local integration matches caller contracts. Use when the gateway or scripts call remote HTTP services and you need a test-client Mock that mirrors method, path, fields, and status codes.
+license: MIT
+metadata:
+  author: sbg
+  version: "1.0"
+---
+
 # Mock External Dependency - 外部依赖本地打桩技能
 
 ## 适用场景
