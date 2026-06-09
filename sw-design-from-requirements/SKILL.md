@@ -1,31 +1,43 @@
 ---
 name: sw-design-from-requirements
-description: Generate software implementation design document from SE requirements and interface specs. Use when creating new design documents or updating existing ones based on requirements.
+description: 基于SE需求文档和接口规范生成软件实现设计文档（主设计文档）。这是设计流程的第一步，生成的文档供后续Story详设使用。
 license: MIT
 metadata:
   author: sbg
-  version: "1.0"
+  version: "2.0"
 ---
 
-# 从需求文档生成软件实现设计
+# 软件实现设计文档生成 Skill
 
-根据 SE 需求文档、接口文档，生成完整的软件实现设计文档。
+根据 SE 需求文档、接口文档，生成完整的软件实现设计文档（主设计文档），供后续Story详设使用。
 
 ## 何时使用
 
-- 需要根据 SE 需求文档创建软件实现设计
+- 需要根据 SE 需求文档创建软件实现设计文档（主设计文档）
 - 需要根据接口文档补充技术细节
 - 需要更新现有设计文档以匹配新需求
 
+## 与Story详设的关系
+
+此skill生成的软件实现设计文档，将作为story-detail-design skill的输入：
+```
+SE需求文档 + 接口文档 
+   ↓ [sw-design-from-requirements] ← 当前skill
+软件实现设计文档（主设计文档）
+   ↓ [story-detail-design] ← 后续skill
+Story详设文档（独立文件）
+   ↓ [code-generation] ← 最终实现
+代码实现
+```
+
 ## 用户需提供
 
-- SE 需求文档路径（包含功能需求、接口需求、数据需求）
-- 接口文档路径（外部系统接口定义）
-- 当前代码仓库路径（用于了解现有实现）
+- **需求描述**：简要描述本次设计的目标功能（如"实现GIDS选主机制和SNMP告警上报")
+- **代码仓库路径**：当前代码仓库路径（用于分析现有实现）
 
 ## 必须遵守
 
-1. 先读取 SE 需求文档、接口文档，理解完整需求后再设计
+1. **必须使用 doc-loader 精准检索文档**，避免全量加载文档库
 2. **必须梳理存量代码**，确认可复用模块、技术栈、代码约定
 3. 遵循现有代码库的技术栈、框架、命名约定
 4. 遗留问题清单直接放在设计文档末尾，不单独文件
@@ -34,21 +46,103 @@ metadata:
 
 ## 实施步骤
 
-### 步骤 1：理解需求
+### 第一步：使用 doc-loader 精准检索规格文档（关键优化）
 
-1. 读取 SE 需求文档，提取：
-   - 功能需求列表
-   - 接口需求（外部依赖）
-   - 数据需求（存储、统计）
-   - 非功能需求（性能、可靠性）
+**目的**：避免全量扫描代码仓，通过文档精准检索减少上下文消耗。
 
-2. 读取接口文档，提取：
-   - API 端点、方法、参数
-   - 请求/响应格式
-   - 错误码定义
-   - 调用频率、超时要求
+#### 1.1 启动 doc-loader agent
 
-### 步骤 2：梳理存量代码（关键步骤）
+使用 Task 工具启动 doc-loader agent，分析需求并返回需要加载的文档列表：
+
+```
+Task(subagent_type="doc-loader", prompt="用户需要实现 [需求描述]。
+
+请分析并返回需要加载的相关规格文档列表，包括：
+1. SE需求文档（包含功能需求、接口需求、数据需求）
+2. 相关的接口规范文档（外部系统接口定义）
+3. 相关的架构设计文档（模块设计、系统架构）
+4. 数据库设计文档（表结构规范、ORM模式）
+5. 其他必要的支撑文档
+
+请返回完整的文档路径列表和关键章节位置。")
+```
+
+**示例调用**：
+
+```
+Task(subagent_type="doc-loader", prompt="用户需要实现 GIDS选主机制和FM告警订阅上报功能。
+
+请分析并返回需要加载的相关规格文档列表：
+1. 27.0告警与话统需求文档
+2. FM订阅接口文档
+3. GIDS模块架构设计
+4. GaussDB表结构设计规范
+5. 现有Service/DAO模式参考文档
+
+请返回完整的文档路径列表和关键章节位置。")
+```
+
+#### 1.2 加载关键规格文档
+
+根据 doc-loader 返回的文档列表，按优先级加载：
+
+| 优先级 | 文档类型 | 加载方式 | 目的 |
+| --- | --- | --- | --- |
+| **P0** | SE需求文档 | `read(filePath, offset, limit)` | 理解功能需求、接口需求、数据需求 |
+| **P0** | 接口规范文档 | `read(filePath)` | 获取 API 端点、请求/响应格式、错误码 |
+| **P1** | 模块设计文档 | `read(filePath)` | 理解模块分层、Service/DAO 模式 |
+| **P1** | 系统架构文档 | `read(filePath, offset, limit)` | 理解技术栈、框架、数据库类型 |
+| **P2** | 数据库设计文档 | `read(filePath)` | 理解表结构设计规范、ORM 模型定义 |
+
+**加载策略**：
+- **优先加载章节**：使用 `offset` 和 `limit` 参数，仅加载相关章节，避免全文档加载
+- **按需加载**：根据分析进展，逐步加载需要的文档
+- **记录关键信息**：提取文档中的关键章节位置、文件路径引用、代码示例
+
+#### 1.3 提取关键信息
+
+从规格文档中提取以下关键信息：
+
+| 信息类型 | 来源文档 | 提取内容 |
+| --- | --- | --- |
+| **功能需求** | SE需求文档 | 需求列表、验收标准、业务场景 |
+| **接口需求** | SE需求文档 + 接口文档 | 外部依赖、API端点、调用频率 |
+| **数据需求** | SE需求文档 | 存储需求、统计需求、数据格式 |
+| **接口契约** | 接口规范文档 | API路径、请求参数、响应格式、错误码 |
+| **技术栈** | 系统架构文档 | 语言、框架、ORM、数据库类型 |
+| **模块结构** | 模块设计文档 | Service/DAO分层、文件目录结构 |
+| **配置项** | SE需求文档 | 配置键、默认值、环境变量 |
+
+**输出格式**：
+
+```markdown
+### 规格文档关键信息提取
+
+**功能需求**：
+- [需求1]：[从SE需求文档提取]
+- [需求2]：[从SE需求文档提取]
+
+**接口需求**：
+- FM订阅接口：POST /fmAlarmOpenApi/subscribe/v1（来源：27.0CSP告警接口文档.md:7-95）
+- FM查询接口：POST /fmOperation/v1/alarms/get_alarms（来源：27.0CSP告警接口文档.md:150-273）
+
+**数据需求**：
+- 选主表：t_gids_master（来源：需求文档）
+- 告警事件表：t_alarm_event（来源：需求文档）
+
+**技术栈确认**：
+- 语言：Go 1.x（来源：系统架构文档）
+- 框架：Beego v2（来源：main.go）
+- ORM：Beego ORM（来源：db_init.go）
+- 数据库：GaussDB（来源：db_init.go）
+
+**模块结构**：
+- Service层：src/service/（来源：模块架构设计）
+- DAO层：src/dao/（来源：模块架构设计）
+- Model层：src/models/db/（来源：模块架构设计）
+```
+
+### 第二步：梳理存量代码（关键步骤）
 
 **目的**：确认现有代码可复用的部分，避免重复设计。
 
@@ -69,7 +163,7 @@ metadata:
 ```markdown
 1. 使用 Task 工具启动 explore agent，让 agent 深入分析代码：
    
-   Task(description="梳理数据库交互流程", prompt="你是一个 Go 语言专家，读取 [代码目录] 下的代码，帮我总结服务与数据库交互的流程：
+   Task(subagent_type="explore", description="梳理数据库交互流程", prompt="你是一个 Go 语言专家，读取 [代码目录] 下的代码，帮我总结服务与数据库交互的流程：
    - 如何创建数据库句柄
    - 数据库表的模型存放到哪里
    - 对应的 DAO 怎么调用的
@@ -108,63 +202,6 @@ metadata:
 - 设计建议：[基于现有表的设计建议]
 ```
 
-**示例输出**：
-
-```
-### 数据库交互流程分析（GIDS Go + Beego + ORM）
-
-**1. 数据库句柄创建**：
-- 位置：`GIDS/main.go`
-- 方式：Beego ORM 自动初始化，通过 `orm.RunSyncdb()` 同步表结构
-- 连接池配置：`app.conf` 中 `orm::maxconn` = 100
-
-**2. 数据模型存放**：
-- 模型目录：`GIDS/models/db/`
-- 定义方式：
-  ```go
-  type SessionStats struct {
-      Id         int64  `orm:"pk;auto"`
-      SessionID  string `orm:"size(64)"`
-      StartedAt  string `orm:"type(datetime)"`
-  }
-  ```
-
-**3. DAO 调用方式**：
-- DAO 目录：`GIDS/dao/`
-- 基类：`BaseDao`，提供 `Insert()`、`QueryMulti()`、`DoTxWithCtx()`
-- 调用示例：`dao.NewSessionLogDao().Insert(session)`
-
-**4. 数据库配置**：
-- 配置文件：`GIDS/conf/app.conf`
-- 配置项：
-  ```
-  orm::driver = postgres
-  orm::host = 127.0.0.1
-  orm::port = 5432
-  orm::database = gids_db
-  orm::username = gids
-  orm::password = ${DB_PASSWORD}
-  ```
-
-**5. 新增表设计参考**（t_esn_code）：
-```sql
-CREATE TABLE IF NOT EXISTS t_esn_code (
-    id         SERIAL PRIMARY KEY,
-    esn_code   VARCHAR(32) NOT NULL UNIQUE,
-    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-);
-```
-- 参考：`t_session_stats` 表结构
-- ORM 模型：
-  ```go
-  type EsnCode struct {
-      Id        int64     `orm:"pk;auto"`
-      EsnCode   string    `orm:"size(32);unique"`
-      CreatedAt time.Time `orm:"auto_now_add;type(datetime)"`
-  }
-  ```
-```
-
 #### 2.2 查找可复用模块
 
 | 检查项 | 方法 | 说明 |
@@ -172,7 +209,7 @@ CREATE TABLE IF NOT EXISTS t_esn_code (
 | **现有服务/接口** | `grep` 关键词搜索 | 查找是否已有类似功能实现 |
 | **数据访问层** | 查找 DAO/Repository | 确认现有 DB 表结构和访问方式 |
 | **配置读取** | 查找 Config 文件 | 确认配置读取方式（环境变量、配置文件） |
-| **日志/监控** | 查找 Logger/Monitor | 确认日志框架、监控上报方式 |
+| **日志/监控** | 查找 Logger/Monitor | 碃认日志框架、监控上报方式 |
 
 #### 2.3 确认技术栈
 
@@ -212,34 +249,18 @@ CREATE TABLE IF NOT EXISTS t_esn_code (
 - 错误处理：[处理方式]
 ```
 
-**示例**：
-
-```
-### 存量代码分析
-
-**可复用模块**：
-- TrafficStatsService：GIDS/src/service/traffic_stats_service.go
-  - GetOnline()：可复用于 SNMP 在线用户数上报
-  - GetTrafficOfApp()：可复用于 SNMP 整机吞吐量上报
-
-**技术栈确认**：
-- GIDS：Go + Beego
-- BGW：Java + Spring Boot
-- MC：Go（待确认）
-
-**代码约定**：
-- GIDS：使用 logger.Infof()，配置通过 beego.AppConfig
-- BGW：使用 @Value 注解读取配置，RestTemplate 发送 HTTP
-```
-
-### 步骤 3：设计文档结构
+### 第三步：设计文档结构
 
 按照以下模板生成设计文档：
 
 ```markdown
 # [功能名称] 软件实现设计
 
-## 一、概述
+## 一、需求背景
+
+[描述版本演进背景：上一版本已实现什么、存在什么不足，本版本需要补齐什么，为什么需要这个特性。]
+
+**方案选择**：采用 **方案X — [方案名称]** — [简要描述核心机制]。方案A（[方案名称]）因[排除原因]已排除；方案B（[方案名称]）规划于后续版本。
 
 ### 1.1 文档信息
 
@@ -504,10 +525,10 @@ type XxxService interface {
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
-| 1.0 | [日期] | 首版 |
+| 1.0 | [日期] | 首版
 ```
 
-### 步骤 4：填充设计内容
+### 第四步：填充设计内容
 
 #### 4.1 架构设计
 
@@ -546,7 +567,7 @@ type XxxService interface {
 - 流程图（mermaid）
 - 测试要点
 
-### 步骤 5：检查清单
+### 第五步：检查清单
 
 生成文档后，检查以下内容：
 
@@ -558,7 +579,7 @@ type XxxService interface {
 - [ ] 遗留问题已列出
 - [ ] 代码示例与现有代码风格一致
 
-### 步骤 6：补充遗留问题
+### 第六步：补充遗留问题
 
 在文档末尾添加遗留问题清单：
 
@@ -581,7 +602,7 @@ type XxxService interface {
 ## 本仓库参考路径
 
 - SE 需求文档：`doc/27.0/告警与话统/27.0告警与话统需求.md`
-- 接口文档：`doc/27.0/告警与话统/27.0告警接口文档.md`
+- 接口文档：`doc/27.0/告警与话统/27.0CSP告警接口文档.md`
 - 设计文档模板：`doc/template/软件实现设计.md`
 - 现有设计示例：`doc/27.0/告警与话统/27.0告警与话统软件实现设计.md`
 
